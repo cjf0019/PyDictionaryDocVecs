@@ -177,7 +177,7 @@ class Doc2VecWordFixed(gensim.models.doc2vec.Doc2Vec):
                                            doctag_vectors=doctag_vectors, learn_doctags=False, doctag_locks=doctag_locks)                    
                 else:    
                     tally += train_document_dm(self, doc.words, doctag_indexes, alpha, work, neu1, 
-                                           doctag_locks=doctag_locks, learn_words=ifdnn, dnn=dnn)
+                                           doctag_locks=doctag_locks, learn_words=False, learn_hidden=False, dnn=dnn)
             self.docvecs.trained_item(indexed_doctags)
 
         return tally, self._raw_word_count(job)
@@ -218,21 +218,20 @@ class Doc2VecWordFixed(gensim.models.doc2vec.Doc2Vec):
         vocab = defaultdict(int)
         for document_no, document in enumerate(documents):
             document_length = len(document.words)
-            if isinstance(document.words, list):          #added to include documents as lists of sentences
+            if isinstance(document.words[0], list):          #added to include documents as lists of sentences
                 self.docvecs.note_doctag(document.tags, document_no, document_length)
                 for sentence in document.words:
                     for word in sentence:
                         vocab[word] += 1
                 total_words += len(document.words)
             else:
-                self.docvecs.note_doctag(tag, document_no, document_length)
+                self.docvecs.note_doctag(document.tags, document_no, document_length)
                 for word in document.words:
                     vocab[word] += 1
                 total_words += len(document.words)               
 
         self.corpus_count = document_no + 1
         self.raw_vocab = vocab
-        print(self.raw_vocab.keys())        
 
         min_count = min_count or self.min_count
         retain_total = 0
@@ -243,15 +242,28 @@ class Doc2VecWordFixed(gensim.models.doc2vec.Doc2Vec):
             self.min_count = min_count
             self.sample = sample
         #keep words found in BOTH previous layer's vocab and in current documents... necessary for accurate probabilities
+        vocabcopy = self.vocab
         retain_words = list(filter(lambda x: x in list(self.vocab.keys()), self.raw_vocab.keys()))
         self.vocab = {}
+        syn0indices = []
         for word, v in iteritems(self.raw_vocab):
             if word in set(retain_words): 
+                syn0indices.append(vocabcopy[word].index)
                 retain_total += v      #might want to reexamine v here
                 if not dry_run:            
-                    self.vocab[word] = gensim.models.word2vec.Vocab(count=v, index=len(self.index2word))
+                    self.vocab[word] = gensim.models.word2vec.Vocab(count=v, index=len(self.vocab))
                     self.index2word.append(word)
-            
+        self.syn0 = self.syn0[syn0indices,:]
+        self.syn1 = self.syn1[syn0indices,:]
+   
+#        self.vocab = {}
+#        for word, v in iteritems(self.raw_vocab):
+#            if word in set(retain_words): 
+#                retain_total += v      #might want to reexamine v here
+#                if not dry_run:            
+#                    self.vocab[word] = gensim.models.word2vec.Vocab(count=v, index=vocabcopy[word].index)
+#                    self.index2word.append(word)
+                    
         # Precalculate each vocabulary item's threshold for sampling
         if not sample:
             # no words downsampled
@@ -267,6 +279,7 @@ class Doc2VecWordFixed(gensim.models.doc2vec.Doc2Vec):
         downsample_total, downsample_unique = 0, 0
         for w in retain_words:
             v = self.raw_vocab[w]
+            print(v)
             word_probability = (np.sqrt(v / threshold_count) + 1) * (threshold_count / v)
             if word_probability < 1.0:
                 downsample_unique += 1
