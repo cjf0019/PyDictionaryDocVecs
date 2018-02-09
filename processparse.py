@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Created on Sat Jan  6 15:51:31 2018
-
+Used to extract parse trees from Stanford's CoreNLP Constituency Parser. After 
+running the parser, this code extracts the trees and places them in a modified 
+version of the NLTK tree, called "NLTKTreeNoPunct," which was used to discard 
+punctuation parses. 
 @author: InfiniteJest
 """
 import os
 import re
 os.chdir('C:\\Users\\InfiniteJest\\Documents\\Python_Scripts')
-import rntn
-os.chdir('C:\\Users\\InfiniteJest\\Documents\\Python_Scripts\\stanford-corenlp-full-2017-06-09')
 from nltk.tree import Tree
 from six import string_types
 import tensorflow as tf
@@ -23,37 +24,9 @@ test2 = """(ROOT
       (CC and)
       (JJ responsive))
     (. .)))"""
-
-def process_branch(branch, keep_pos=False):
-    branched = re.findall('(?<=\().*(?=\()', branch)
-    if keep_pos==True:
-        pos = re.search('[A-Z]*', branched.group())
-        return branched, pos
-    else:
-        return branched
-    
-
-def process_tree(tree, keep_pos=False):
-    treed = []
-    partospeech = []
-    branched = re.findall('(?<=\().*(?=\()', tree)
-    treed.append(branched)
-    if keep_pos == True:
-        partospeech.append(re.search('[A-Z]*', branched.group()))
-    while len(branched) != 0:
-        if keep_pos == True:
-            branched, pos = process_branch(branched[0], keep_pos=keep_pos)
-            treed.append(branched)
-            partospeech.append(pos)
-        else:
-            branched = process_branch(branched[0], keep_pos=keep_pos)
-            treed.append(branched)
-    if keep_pos == True:
-        return treed, partospeech
-    else:
-        return treed
       
-def get_labels(tree):
+    
+def get_labels(tree, tfembed = None, label2index = None):
     # must be returned in the same order as tree logits are returned
     # post-order traversal
     if len(tree) == 1:
@@ -61,7 +34,12 @@ def get_labels(tree):
             if isinstance(tree[0], Tree):
                 return get_labels(tree[0])
             else:
-                return [tree.label()]
+                if tfembed != None and label2index != None:
+                    return tf.nn.embedding_lookup(tfembed, label2index[tree.label()])
+                elif tfembed != None and label2index == None:
+                    print("Must specify a label2index dictionary for embeddings!")
+                else:
+                    return [tree.label()]
         else:
             return []
     elif len(tree) > 2:
@@ -76,61 +54,15 @@ def get_labels(tree):
         return get_labels(first) + [tree.label()]
     elif len(tree) == 2:
         return get_labels(tree[0]) + get_labels(tree[1]) + [tree.label()]
-    
-
-def tensor_mul(d, x1, A, x2):
-    A = tf.reshape(A, [d, d*d])
-    # (1 x d) x (d x dd)
-    tmp = tf.matmul(x1, A)
-    # (1 x dd)
-    tmp = tf.reshape(tmp, [d, d])
-    # (d x d)
-    tmp = tf.matmul(tmp, tf.transpose(x2))
-    # (d x 1)
-    return tf.reshape(tmp, [1, d])
 
 
-class NLTKRNTN(RNTN):
-    def __init__(self, V, D, K, activation):
-        super(RNTN, self).__init__(V, D, K, activation)
-        
-    def get_output_recursive(self, tree, list_of_logits):
-        if len(tree) == 1:
-            if isinstance(tree, Tree):
-                    x = self.get_output_recursive(tree, list_of_logits)
-            elif isinstance(tree, str):
-                x = tf.nn.embedding_lookup(self.We, [tree])
-        elif len(tree) > 2:
-            for subtree in tree:
-                if isinstance(subtree, Tree):
-                    if tree.index(subtree) == 0:
-                        first = subtree
-                    else:
-                        first = Tree(tree.label(), [first, subtree])
-                else:
-                    pass
-            return self.get_output_recursive(first, list_of_logits)
-        elif len(tree) == 2:
-            x1 = self.get_output_recursive(tree[0], list_of_logits, is_root=False)
-            x2 = self.get_output_recursive(tree[1], list_of_logits, is_root=False)
-            x = self.f(
-                tensor_mul(self.D, x1, self.W11, x1) +
-                tensor_mul(self.D, x2, self.W22, x2) +
-                tensor_mul(self.D, x1, self.W12, x2) +
-                tf.matmul(x1, self.W1) +
-                tf.matmul(x2, self.W2) +
-                self.bh)
-    
-        logits = tf.matmul(x, self.Wo) + self.bo
-        list_of_logits.append(logits)
-        return x
 
-class NLTKTreeNoPeriod(Tree):
+class NLTKTreeNoPunct(Tree):
     def __init__(self, node, children=None):
-        super(NLTKTreeNoPeriod, self).__init__(node=node, children=children)
+        super(NLTKTreeNoPunct, self).__init__(node=node, children=children)
         
     @classmethod
-    def fromstringnoperiod(cls, s, brackets='()', read_node=None, read_leaf=None,
+    def fromstringnopunct(cls, s, brackets='()', read_node=None, read_leaf=None,
               node_pattern=None, leaf_pattern=None,
               remove_empty_top_bracketing=False):
         """
@@ -209,11 +141,140 @@ class NLTKTreeNoPeriod(Tree):
 
 
 
-class FileIterator(object):
-    def __init__(self, file):
-        self.file = file
-    
-    def __iter__(self):
-        for i in open(self.file):
-            yield i
+def xtrcttree(file):
+    firstline = file.readline()
+    numtokens = re.search('(?<=[\(])[0-9]+(?= token)', firstline)
+    numtokens = numtokens.group(0)
+    for i in range(int(numtokens)+1):
+        file.readline()
+    j = 0
+    tree = []
+    while j != 1:
+        treeline = file.readline()
+        if re.search('root\(ROOT', treeline):
+            j = 1
+            depend = ''
+            while not re.match('punct\(.*\, [^\:\`\'\-]', depend):
+                depend = file.readline()
+            file.readline()
+        else:
+            tree.append(treeline)
+    return ''.join(tree)
 
+
+def add_embedding(self, V, D):
+        """Adds an embedding layer that maps from input tokens (integers) to vectors and then
+        concatenates those vectors:
+            - Creates an embedding tensor and initializes it with self.pretrained_embeddings.
+            - Uses the input_placeholder to index into the embeddings tensor, resulting in a
+              tensor of shape (None, n_features, embedding_size).
+            - Concatenates the embeddings by reshaping the embeddings tensor to shape
+              (None, n_features * embedding_size).
+
+        Hint: You might find tf.nn.embedding_lookup useful.
+        Hint: You can use tf.reshape to concatenate the vectors. See following link to understand
+            what -1 in a shape means.
+            https://www.tensorflow.org/api_docs/python/array_ops/shapes_and_shaping#reshape.
+
+        Returns:
+            embeddings: tf.Tensor of shape (None, n_features*embed_size)
+        """
+        ### YOUR CODE HERE
+    emb = tf.placeholder(tf.float32, shape=(V, D))
+    embeddings = tf.nn.embedding_lookup(emb, self.input_placeholder)
+    embeddings = tf.reshape(embeddings, (-1, self.config.n_features*self.config.embed_size))
+        ### END YOUR CODE
+    return embeddings
+
+
+def get_labels3(tree, tfembed = None):
+    # must be returned in the same order as tree logits are returned
+    # post-order traversal
+    if len(tree) == 1:
+        if isinstance(tree, Tree):
+            if isinstance(tree[0], Tree):
+                return get_labels(tree[0])
+            else:
+                if tfembed != None:
+                    return [tf.nn.embedding_lookup(tfembed, tree.label())]
+                else:
+                    return [tree.label()]
+        else:
+            return []
+
+    elif len(tree) > 2:
+        for subtree in tree:
+            if isinstance(subtree, Tree):
+                if tree.index(subtree) == 0:
+                    first = subtree
+                else:
+                    first = Tree(tree.label(), [first, subtree])
+            else:
+                pass
+        if tfembed != None:
+            return get_labels(first) + [tf.nn.embedding_lookup(tfembed, tree.label())]
+        else:    
+            return get_labels(first) + [tree.label()]
+
+    elif len(tree) == 2:
+        if tfembed != None:
+            return get_labels(tree[0]) + get_labels(tree[1]) + \
+                    [tf.nn.embedding_lookup(tfembed, tree.label())]
+        else:
+            return get_labels(tree[0]) + get_labels(tree[1]) + [tree.label()]
+
+
+def get_labels1(tree):
+    # must be returned in the same order as tree logits are returned
+    # post-order traversal
+    if len(tree) == 1:
+        if isinstance(tree, Tree):
+            if isinstance(tree[0], Tree):
+                return get_labels(tree[0])
+            else:
+                return [tree.label()]
+        else:
+            return []
+    elif len(tree) > 2:
+        for subtree in tree:
+            if isinstance(subtree, Tree):
+                if tree.index(subtree) == 0:
+                    first = subtree
+                else:
+                    first = Tree(tree.label(), [first, subtree])
+            else:
+                pass
+        return get_labels(first) + [tree.label()]
+    elif len(tree) == 2:
+        return get_labels(tree[0]) + get_labels(tree[1]) + [tree.label()]
+    
+    
+
+def process_branch(branch, keep_pos=False):
+    branched = re.findall('(?<=\().*(?=\()', branch)
+    if keep_pos==True:
+        pos = re.search('[A-Z]*', branched.group())
+        return branched, pos
+    else:
+        return branched
+    
+
+def process_tree(tree, keep_pos=False):
+    treed = []
+    partospeech = []
+    branched = re.findall('(?<=\().*(?=\()', tree)
+    treed.append(branched)
+    if keep_pos == True:
+        partospeech.append(re.search('[A-Z]*', branched.group()))
+    while len(branched) != 0:
+        if keep_pos == True:
+            branched, pos = process_branch(branched[0], keep_pos=keep_pos)
+            treed.append(branched)
+            partospeech.append(pos)
+        else:
+            branched = process_branch(branched[0], keep_pos=keep_pos)
+            treed.append(branched)
+    if keep_pos == True:
+        return treed, partospeech
+    else:
+        return treed
